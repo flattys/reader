@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>朗读阅读器</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<meta name="theme-color" content="#c2543a">
+<style>
+  :root {
+    --bg: #f6f0e4; --paper: #fffaf0; --ink: #2b2620; --muted: #8a7f6d;
+    --accent: #c2543a; --hl: #ffe3a3; --line: #e3d9c4;
+  }
+  body.dark {
+    --bg: #1b1a18; --paper: #24221f; --ink: #d9d3c7; --muted: #8c8575;
+    --accent: #e0805f; --hl: #4a3b1d; --line: #3a362f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10; background: var(--paper);
+    border-bottom: 1px solid var(--line); padding: 10px 16px;
+    display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center;
+  }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; color: var(--accent); }
+  button, select, label.btn {
+    font: inherit; font-size: 14px; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  button:hover, label.btn:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); min-width: 72px; }
+  input[type=file] { display: none; }
+  .group { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  input[type=range] { width: 100px; accent-color: var(--accent); }
+  #voice { max-width: 230px; }
+  main { max-width: 760px; margin: 24px auto 120px; padding: 0 16px; }
+  #empty {
+    background: var(--paper); border: 2px dashed var(--line); border-radius: 14px;
+    padding: 32px; text-align: center; color: var(--muted);
+  }
+  #empty textarea {
+    width: 100%; height: 140px; margin-top: 14px; padding: 10px; font: inherit;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink);
+  }
+  #empty.drag { border-color: var(--accent); }
+  #book {
+    background: var(--paper); border-radius: 14px; padding: 36px 40px;
+    line-height: 2; font-size: 20px;
+    font-family: "Songti SC", "Noto Serif SC", "SimSun", serif;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06);
+  }
+  #book p { margin: 0 0 .9em; text-indent: 2em; }
+  .s { cursor: pointer; border-radius: 4px; transition: background .15s; }
+  .s:hover { background: rgba(194,84,58,.12); }
+  .s.cur { background: var(--hl); }
+  #status {
+    position: fixed; bottom: 0; left: 0; right: 0; background: var(--paper);
+    border-top: 1px solid var(--line); padding: 8px 16px; font-size: 13px; color: var(--muted);
+    display: flex; gap: 12px; align-items: center;
+  }
+  #bar { flex: 1; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  #bar > div { height: 100%; width: 0; background: var(--accent); }
+  #warn { display: none; background: #fde8e2; color: #8a2d1a; padding: 10px 16px; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="warn"></div>
+<header>
+  <h1>📖 朗读阅读器</h1>
+  <label class="btn">打开文件<input type="file" id="file" accept=".txt,text/plain"></label>
+  <button id="prev" title="上一句">⏮</button>
+  <button id="play" class="primary">▶ 朗读</button>
+  <button id="next" title="下一句">⏭</button>
+  <select id="voice" title="声音"></select>
+  <div class="group">语速 <input type="range" id="rate" min="0.6" max="1.6" step="0.1" value="1"><span id="rateVal">1.0×</span></div>
+  <div class="group">字号 <input type="range" id="size" min="16" max="34" step="1" value="20"></div>
+  <button id="theme" title="深色/浅色">🌙</button>
+</header>
+
+<main>
+  <div id="empty">
+    <div style="font-size:18px;color:var(--ink)">把 txt 文件拖到这里，或点上方「打开文件」</div>
+    <div style="margin-top:6px">也可以直接粘贴文字：</div>
+    <textarea id="paste" placeholder="在这里粘贴文字，然后点下面的按钮"></textarea>
+    <div style="margin-top:10px"><button id="usePaste">开始阅读</button></div>
+  </div>
+  <article id="book" style="display:none"></article>
+</main>
+
+<div id="status">
+  <span id="pos">未加载</span>
+  <div id="bar"><div></div></div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const synth = window.speechSynthesis;
+  let sentences = [];     // [{text, el}]
+  let cur = 0;
+  let playing = false;
+  let token = 0;          // invalidates stale onend callbacks
+  let bookKey = '';
+  let voices = [];
+
+  if (!synth) {
+    $('warn').style.display = 'block';
+    $('warn').textContent = '这个浏览器不支持语音朗读，请用 Microsoft Edge 打开。';
+  }
+
+  // ---------- voices ----------
+  function loadVoices() {
+    voices = synth.getVoices().filter(v => /^zh/i.test(v.lang));
+    // Prefer Edge "Natural" neural voices first
+    voices.sort((a, b) => score(b) - score(a));
+    const sel = $('voice');
+    const saved = localStorage.getItem('voiceName');
+    sel.innerHTML = '';
+    voices.forEach(v => {
+      const o = document.createElement('option');
+      o.value = v.name; o.textContent = v.name.replace('Microsoft ', '') + ' · ' + v.lang;
+      sel.appendChild(o);
+    });
+    if (saved && voices.some(v => v.name === saved)) sel.value = saved;
+    if (!voices.length) {
+      $('warn').style.display = 'block';
+      $('warn').textContent = '没有找到中文语音。请用 Microsoft Edge 打开本页面（Edge 自带 Xiaoxiao、Yunxi 等自然语音）。';
+    } else if (!voices.some(v => /natural/i.test(v.name))) {
+      $('warn').style.display = 'block';
+      $('warn').textContent = '提示：没有检测到 Edge 的「Natural」自然语音，可能不是在 Edge 里打开，或需要联网。声音会比较机械。';
+    } else $('warn').style.display = 'none';
+  }
+  function score(v) {
+    let s = 0;
+    if (/natural/i.test(v.name)) s += 10;
+    if (/online/i.test(v.name)) s += 2;
+    if (/CN|Mainland/i.test(v.lang + v.name)) s += 3;
+    if (/xiaoxiao/i.test(v.name)) s += 1;
+    return s;
+  }
+  if (synth) { loadVoices(); synth.onvoiceschanged = loadVoices; }
+  $('voice').onchange = () => { localStorage.setItem('voiceName', $('voice').value); restartIfPlaying(); };
+
+  // ---------- text loading ----------
+  function decode(buf) {
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+    catch { return new TextDecoder('gb18030').decode(buf); }  // old Chinese txt files
+  }
+
+  function loadText(text, key) {
+    stop();
+    bookKey = 'pos:' + key;
+    const book = $('book');
+    book.innerHTML = '';
+    sentences = [];
+    const paras = text.replace(/\r\n?/g, '\n').split(/\n+/).map(s => s.trim()).filter(Boolean);
+    const re = /[^。！？!?…\n]+[。！？!?…]*[”’」』）)"']*|[。！？!?…]+[”’」』）)"']*/g;
+    const frag = document.createDocumentFragment();
+    for (const para of paras) {
+      const p = document.createElement('p');
+      for (const seg of (para.match(re) || [para])) {
+        const span = document.createElement('span');
+        span.className = 's';
+        span.textContent = seg;
+        const idx = sentences.length;
+        span.onclick = () => { cur = idx; mark(); if (playing) speak(); else play(); };
+        sentences.push({ text: seg, el: span });
+        p.appendChild(span);
+      }
+      frag.appendChild(p);
+    }
+    book.appendChild(frag);
+    $('empty').style.display = 'none';
+    book.style.display = '';
+    cur = Math.min(parseInt(localStorage.getItem(bookKey) || '0', 10) || 0, sentences.length - 1);
+    mark(true);
+  }
+
+  $('file').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    loadText(decode(await f.arrayBuffer()), f.name + f.size);
+    document.title = f.name.replace(/\.[^.]+$/, '') + ' · 朗读阅读器';
+  };
+  $('usePaste').onclick = () => {
+    const t = $('paste').value.trim(); if (t) loadText(t, 'paste' + t.length);
+  };
+  const drop = $('empty');
+  ['dragover','dragenter'].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
+  ['dragleave','drop'].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+  document.addEventListener('drop', async e => {
+    const f = e.dataTransfer.files[0]; if (!f) return;
+    loadText(decode(await f.arrayBuffer()), f.name + f.size);
+    document.title = f.name.replace(/\.[^.]+$/, '') + ' · 朗读阅读器';
+  });
+
+  // ---------- speaking ----------
+  function mark(instant) {
+    sentences.forEach(s => s.el.classList.remove('cur'));
+    const s = sentences[cur]; if (!s) return;
+    s.el.classList.add('cur');
+    s.el.scrollIntoView({ block: 'center', behavior: instant ? 'auto' : 'smooth' });
+    $('pos').textContent = `第 ${cur + 1} / ${sentences.length} 句`;
+    $('bar').firstElementChild.style.width = (sentences.length ? (cur + 1) / sentences.length * 100 : 0) + '%';
+    localStorage.setItem(bookKey, cur);
+  }
+
+  function speak() {
+    if (!synth || !sentences.length) return;
+    synth.cancel();
+    const my = ++token;
+    const u = new SpeechSynthesisUtterance(sentences[cur].text);
+    const v = voices.find(v => v.name === $('voice').value);
+    if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'zh-CN';
+    u.rate = parseFloat($('rate').value);
+    u.onend = () => {
+      if (my !== token || !playing) return;
+      if (cur < sentences.length - 1) { cur++; mark(); speak(); }
+      else stop();
+    };
+    u.onerror = e => { if (my === token && e.error !== 'canceled' && e.error !== 'interrupted') stop(); };
+    mark();
+    synth.speak(u);
+  }
+  function play() { if (!sentences.length) return; playing = true; $('play').textContent = '⏸ 暂停'; speak(); }
+  function stop() { playing = false; token++; if (synth) synth.cancel(); $('play').textContent = '▶ 朗读'; }
+  function restartIfPlaying() { if (playing) speak(); }
+
+  $('play').onclick = () => playing ? stop() : play();
+  $('prev').onclick = () => { if (!sentences.length) return; cur = Math.max(0, cur - 1); playing ? speak() : mark(); };
+  $('next').onclick = () => { if (!sentences.length) return; cur = Math.min(sentences.length - 1, cur + 1); playing ? speak() : mark(); };
+  $('rate').oninput = () => { $('rateVal').textContent = parseFloat($('rate').value).toFixed(1) + '×'; localStorage.setItem('rate', $('rate').value); };
+  $('rate').onchange = restartIfPlaying;
+  $('size').oninput = () => { $('book').style.fontSize = $('size').value + 'px'; localStorage.setItem('size', $('size').value); };
+  $('theme').onclick = () => { document.body.classList.toggle('dark'); localStorage.setItem('dark', document.body.classList.contains('dark') ? '1' : ''); };
+
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'TEXTAREA') return;
+    if (e.code === 'Space') { e.preventDefault(); $('play').click(); }
+    if (e.code === 'ArrowLeft') $('prev').click();
+    if (e.code === 'ArrowRight') $('next').click();
+  });
+
+  // restore settings
+  if (localStorage.getItem('dark')) document.body.classList.add('dark');
+  if (localStorage.getItem('rate')) { $('rate').value = localStorage.getItem('rate'); $('rate').oninput(); }
+  if (localStorage.getItem('size')) { $('size').value = localStorage.getItem('size'); $('size').oninput(); }
+  window.addEventListener('beforeunload', () => synth && synth.cancel());
+})();
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
+</script>
+</body>
+</html>
